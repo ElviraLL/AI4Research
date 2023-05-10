@@ -4,20 +4,26 @@ Version: 0.1
 Auther: Jingwen Liang
 Date: 2023-04-21
 """
-import requests
-from bs4 import BeautifulSoup
-from PyPDF2 import PdfReader
-import openai
 from pathlib import Path
 import logging
+from abc import abstractmethod
+from collections import OrderedDict
 import re
-import os
-import tempfile
-import fitz
+
+from PyPDF2 import PdfReader
+from pdfminer.high_level import extract_text
+from pdfminer.layout import LAParams, LTTextBox
+from pdfminer.pdfpage import PDFPage
+from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
+from pdfminer.converter import PDFPageAggregator
+from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfparser import PDFParser
+from collections import Counter
+import numpy as np
 
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s:%(levelname)s:%(message)s"
 )
 
@@ -25,34 +31,28 @@ class Paper:
     """
     A class to represent a paper.
     """
-    def __init__(self,  url='', save_folder='', gpt_api_key='', pdf_input_path=""):
+    def __init__(self,  url='', save_folder='',  pdf_input_path=""):
         if len(url) == 0 and len(pdf_input_path) == 0:
             raise ValueError("Please provide a url to fetch the paper or a path to your local paper.")
             return
-        if len(url) !=0 and len(save_folder) == 0:
+        if len(url) != 0 and len(save_folder) == 0:
             raise ValueError("The save folder is empty.")
             return
-        if len(gpt_api_key) == 0:
-            raise ValueError("The GPT API key is empty.")
-            return
-        self.gpt_api_key = gpt_api_key
         self.url = url
         self.save_folder = Path(save_folder)
         self.pdf_input_path = pdf_input_path
 
         self.pdf_path = ""
-        self.text = ""
-        self.text_list = []
+
         self.title = ""
         self.authors = ""
         self.conference = ""
         self.model_structure_image = ""
-        self.summary = ""
+
         self.abstract = ""
-        self.language = "English"
-        self.method = ""
-        self.intro = ""
-        self.chapter_names = []
+        self.sections = {}
+        self.subsections = {}
+        self.pdf_dict = {}
 
     def __str__(self):
         return self.title
@@ -60,155 +60,153 @@ class Paper:
     def __repr__(self):
         return self.title
 
+    @abstractmethod
     def fetch(self):
-        if "arxiv.org/abs" in self.url:
-            self.fetch_from_arxiv()
-        elif self.url.lower().endswith("pdf"):
-            self.fetch_from_pdf_url()
-        elif self.pdf_input_path.lower().endswith("pdf"):
-            self.pdf_path = self.pdf_input_path
-            logging.info("Reading from local pdf file: %s", self.pdf_path)
-        else:
-            raise ValueError("The url of the paper is not supported.")
-
-    def fetch_from_arxiv(self):
         """
-        Fetch the paper from the arxiv abstract url. Get the paper information such as title, author, abstract, etc
+        Fetch the paper from the url or local path.
         """
-        logging.info(f"Fetching paper from URL:  %s", self.url)
-        response = requests.get(self.url)
-        soup = BeautifulSoup(response.content, 'html.parser')
+        pass
 
-        self.title = soup.find('h1', class_='title mathjax').text.replace("Title:", "").strip()
-        valid_filename = re.sub(r'[\\/:"*?<>| \s]+', "_", self.title)
-
-        author_elements = soup.find('div', {'class': 'authors'}).find_all('a')
-        self.authors = ", ".join(a.get_text(strip=True) for a in author_elements)
-
-        self.abstract = soup.find('blockquote', class_='abstract mathjax').text.replace("Abstract: ", "").strip()
-
-        self.comments = soup.find('td', class_="tablecell comments mathjax").text.strip()
-        self.conference = self.get_conferenct()
-        self.save_folder = self.save_folder/valid_filename
-        self.save_folder.mkdir(parents=True, exist_ok=True)
-        self.pdf_path = self.save_folder / f"{valid_filename}.pdf"
-
-        # pdf_link is extracted from the arXiv paper's abstract page using Beautiful Soup
-        pdf_link = soup.find('a', class_='abs-button download-pdf')['href']
-
-        # pdf_url is the url of the pdf file
-        pdf_url = f"https://arxiv.org{pdf_link}"
-
-        with requests.get(pdf_url) as r:
-            with open(self.pdf_path, 'wb') as f:
-                f.write(r.content)
-        logging.info(f"Downloaded paper to %s", self.pdf_path)
-
-
-    def get_conferenct(self):
-        CONFERENCES = ["CVPR", "ICCV", "ECCV", "NIPS", "ICML", "AAAI", "IJCAI", "ACL", "EMNLP", "NAACL", "COLING", "ICASSP", "ICLR"]
-        if self.comments:
-            # get the conference name from the comments
-            for conference in CONFERENCES:
-                if conference in self.comments:
-                    self.conference = conference
-                    break
-
-
-    def fetch_pdf(self):
+    def get_font_sizes(self):
         """
-        Fetch the paper from the given url, the url directly give you the pdf file, not the abs pages.
-        We don't need to parse the title and abstract from the pdf file.
+        Get the font sizes in the paper.
+        The function first goes through the entire PDF document and gathers all font sizes. It does this by iterating
+        over all the pages in the PDF document and processing each one with the PDFPageInterpreter and
+        PDFPageAggregator. It then examines each layout object in the page layout. If the object is a LTTextBox (a block
+        of text), it examines each text line in the box. If the text line is not empty, it appends the height (which
+        corresponds to the font size) to the font_sizes list. Note that it ignores text in the area where the arXiv
+        identifier typically appears (top left of the first page).
         """
-        logging.info(f"Fetching paper from URL: %s", self.url)
-        # Download the PDF to a temporary file
-        with requests.get(self.url) as r:
-            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                temp_file.write(r.content)
-                temp_pdf_path = temp_file.name
+        logging.info("Getting the font sizes in the paper.")
+        if self.pdf_path == "":
+            raise ValueError("The pdf file path is empty.")
+            return
+        with open(self.pdf_path, 'rb') as fp:
+            # PDFParser object, takes a file-like object and extracts raw information from the PDF file.
+            parser = PDFParser(fp)
+            # PDFDocument object, represents the structure of a PDF document and is created from the PDFParser object
+            doc = PDFDocument(parser)
+            # PDFResourceManager object, stores shared resources such as fonts or images used by both PDFPageInterpreter and PDFDevice.
+            rsrcmgr = PDFResourceManager()
 
-        # Extract the title from the PDF metadata
-        with open(temp_pdf_path, 'rb') as f:
-            pdf_reader = PdfReader(f)
-            metadata = pdf_reader.getDocumentInfo()
-            self.title = metadata.get('/Title', 'Untitled')
+            laparams = LAParams()
+            # PDFPageAggregator object, takes a PDFPageInterpreter object and collects layout information from the interpreter.
+            device = PDFPageAggregator(rsrcmgr, laparams=laparams)
 
-        # Replace invalid characters in the title
-        valid_filename = re.sub(r'[\\/:"*?<>|\s]+', "_", self.title)
-        self.save_folder = self.save_folder / valid_filename
-        self.save_folder.mkdir(parents=True, exist_ok=True)
+            # PDFPageInterpreter object, processes the page contents and sends the information to a device (in this case, the PDFPageAggregator).
+            interpreter = PDFPageInterpreter(rsrcmgr, device)
 
-        # Update save_path with the title
-        self.pdf_path = self.save_folder/"{valid_filename}.pdf"
+            # first, get all the font sizes in the document
+            font_sizes = {}
+            for page in PDFPage.create_pages(doc):
+                interpreter.process_page(page)
+                layout = device.get_result()
+                for lobj in layout:
+                    if isinstance(lobj, LTTextBox):
+                        for obj in lobj:
+                            if obj.get_text().strip():
+                                # ignore the arxiv identifier TODO: need to find a better way to do this
+                                if obj.width <= 21:
+                                    continue
+                                size = np.round(obj.height, decimals=2)
+                                if size not in font_sizes:
+                                    font_sizes[size] = [obj.get_text().strip()]
+                                else:
+                                    font_sizes[size].append(obj.get_text().strip())
+            return font_sizes
 
-        # Move the temporary PDF file to the final destination
-        os.rename(temp_pdf_path, self.pdf_path)
 
-        logging.info(f"Downloaded paper to %s", self.pdf_path)
+    def get_sections(self):
+        font_sizes = self.get_font_sizes()
+        font_sizes = OrderedDict(sorted(font_sizes.items(), reverse=True))
+
+        # put the pdf into a dictionary by hierarchy
+        # step 1: get the font size of the title
+        title_font_size = list(font_sizes.keys())[0]
+        if not self.title:
+            # it is possible that the title has two lines
+            # TODO: we ignore the case where the title has more than two lines
+            if len(font_sizes[title_font_size]) >= 2:
+                self.title = font_sizes[title_font_size][0] + " " + font_sizes[title_font_size][1]
+
+        # step 2: get the section names and subsection names using regular expressions
+        pattern = re.compile(r'\d+(\.\d+)?\.\s+.+')  # TODO: only deal with the case where the section number is 1.1
+        sections = []
+        sec1_size = 0
+        subsections = []
+        for key, value in font_sizes.items():
+            temp = []
+            for text in value:
+                match = pattern.match(text)
+                if match:
+                    temp.append(text)
+            if len(temp) >= 3:
+                if not sections:
+                    sections = temp.copy()
+                    sec1_size = key
+                else:
+                    if key < sec1_size:
+                        subsections = temp.copy()
+                    else:
+                        subsections = sections.copy()
+                        sections = temp.copy()
+                        break
+        sections.insert(0, "Abstract")
+        self.sections = sections
+        self.subsections = subsections
 
 
     def parse(self):
         """
         Parse the paper.
         """
-        logging.info("Parsing paper")
-        with open(self.pdf_path, 'rb') as f:
-            pdf_reader = PdfReader(f)
-            # Extract text from the PDF
-            for page_number, page in enumerate(pdf_reader.pages):
-                text = page.extract_text()
-                self.text_list.append(text)
-            self.text = ' '.join(self.text_list)
-        logging.info(f"Parsed PDF successfully")
+        self.get_sections()
+        pdf_dict = {}
+
+        # Flatten the sections for easier lookup
+        flat_sections = self.sections + self.subsections
+
+        # Extract text from the PDF
+        text = extract_text(self.pdf_path)
+
+        # Split text into lines
+        lines = text.split('\n')
+
+        # Initialize variables
+        current_section = None
+        current_subsection = None
+
+        # Iterate over lines
+        for line in lines:
+            # TODO: skip everything after the references section
+            # TODO: skip page numbers
+            # TODO: skip figures and tables
+            if line == 'References':
+                break
+            # If line is a section header, start a new section
+            if line in flat_sections:
+                if line in self.sections:
+                    current_section = line
+                current_subsection = line
+                pdf_dict.setdefault(current_section, {}).setdefault(current_subsection, [])
+            # Otherwise, append line to current section
+            elif current_section is not None:
+                pdf_dict[current_section][current_subsection].append(line)
+
+        self.pdf_dict = pdf_dict
+        for section, subsections in pdf_dict.items():
+            print(f'{section}:')
+            for subsection, content in subsections.items():
+                print(f'  {subsection}:')
+                for line in content:
+                    print(f'    {line}')
 
 
 
 
-    def summarize(self):
-        """
-        Summarize the paper.
 
-        Args:
-            gpt_api_key: The api key of the openai gpt-3.
-        """
-        logging.info("Summarizing paper")
-        openai.api_key = self.gpt_api_key
-        messages = [
-            {"role": "system", "content": "You are a experienced AI researcher. You can read paper about "
-                                          "state of the arts AI researchs and write summary about it methodology."},
-            {"role": "user", "content": f"Please help me read the paper and write a summary about its methodology. The paper is here: {self.method}"},
-        ]
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-        )
-        self.summary = response.choices[0].text.strip()
-        for choice in response.choices:
-            self.summary += choice.message.content
-        print("summary_result:\n", self.summary)
-        print("prompt_token_used:", response.usage.prompt_tokens,
-              "completion_token_used:", response.usage.completion_tokens,
-              "total_token_used:", response.usage.total_tokens)
-        print("response_time:", response.response_ms/1000.0, 's')
-        logging.info("Finished summarizing paper")
 
-    def extract_main_figure(self):
-        """
-        Extract the main model structure figure
-        """
-        # use fitz to extract all the figures and their captions
-        doc = fitz.open(self.pdf_path)
 
-        # calcualte the number of pages in the PDF file
-        page_count = len(doc)
-
-        # create an empty list to store the figures and their captions
-        figures = []
-
-        # extract all images information from each page
-        for page_num in range(page_count):
-            page_content = doc[page_num]
-            figures.extend(page_content.get_images())
 
 
 
