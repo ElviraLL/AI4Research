@@ -4,13 +4,13 @@ Version: 0.1
 Auther: Jingwen Liang
 Date: 2023-04-21
 """
+
 from pathlib import Path
 import logging
 from abc import abstractmethod
 from collections import OrderedDict
 import re
 
-from PyPDF2 import PdfReader
 from pdfminer.high_level import extract_text
 from pdfminer.layout import LAParams, LTTextBox
 from pdfminer.pdfpage import PDFPage
@@ -18,7 +18,6 @@ from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
 from pdfminer.converter import PDFPageAggregator
 from pdfminer.pdfdocument import PDFDocument
 from pdfminer.pdfparser import PDFParser
-from collections import Counter
 import numpy as np
 
 

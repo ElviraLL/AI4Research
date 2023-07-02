@@ -1,7 +1,15 @@
+"""
+A module communicates with ChatGPT and reads the paper.
+Version: 0.1
+Auther: Jingwen Liang
+Date: 2023-04-21
+"""
+
 import logging
 
 logger = logging.getLogger(__name__)
 import openai
+
 
 class PaperReader:
     def __init__(self, paper):
