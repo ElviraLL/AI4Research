@@ -3,26 +3,50 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 import re
+import arxiv
 from pathlib import Path
 
+# TODO: conference
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s:%(levelname)s:%(message)s"
+)
 logger = logging.getLogger(__name__)
 class ArxivPaper(Paper):
-    def __init__(selfself, url='', save_folder='',  pdf_input_path=""):
-        super().__init__(url, save_folder, pdf_input_path)
+    def __init__(self, result: arxiv.Result=None, save_folder='', pdf_input_path='', url=''):
+        if result:
+            super().__init__(url="", save_folder=save_folder, pdf_input_path=pdf_input_path)
+            self.url = result.entry_id
+            self.pdf_path = ""
+            self.title = result.title
+            self.authors = [item.name for item in result.authors]
+            self.conference = result.journal_ref
+            self.abstract = result.summary
+            self.categories = result.categories
+            self.published = result.published
+            self.comments = result.comment
+            self.doi = result.doi
+            self.fetch()
+        elif url:
+            super().__init__(url=url, save_folder=save_folder, pdf_input_path=pdf_input_path)
+            self.comments = None
+            self.fetch()
+        else:
+            raise ValueError("Cannot create paper object. Please provide more information!")
 
 
     def fetch(self):
         if "arxiv.org/abs" in self.url:
             self.fetch_from_arxiv()
         else:
-            raise ValueError("The url of the paper is not supported, please provide an arXiv paper url.")
+            raise ValueError(f"The url {self.url} of the paper is not supported, please provide an arXiv paper url.")
 
     def fetch_from_arxiv(self):
         """
         Fetch the paper from the arxiv abstract url. Get the paper information such as title, author, abstract, etc
         """
-        logger.info(f"Fetching paper from URL:  %s", self.url)
+        logger.info(f"Fetching paper from Arxiv:  %s", self.url)
         response = requests.get(self.url)
         soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -30,12 +54,15 @@ class ArxivPaper(Paper):
         valid_filename = re.sub(r'[\\/:"*?<>| \s]+', "_", self.title)
 
         author_elements = soup.find('div', {'class': 'authors'}).find_all('a')
-        self.authors = ", ".join(a.get_text(strip=True) for a in author_elements)
 
-        self.abstract = soup.find('blockquote', class_='abstract mathjax').text.replace("Abstract: ", "").strip()
+        if not self.authors:
+            self.authors = ', '.join(a.get_text(strip=True) for a in author_elements).split(', ')
 
-        self.comments = soup.find('td', class_="tablecell comments mathjax").text.strip()
-        self.conference = self.get_conferenct()
+        if not self.abstract:
+            self.abstract = soup.find('blockquote', class_='abstract mathjax').text.replace("Abstract: ", "").strip()
+
+        if not self.conference:
+            self.conference = self.get_conferenct()
         self.save_folder = self.save_folder/valid_filename
         self.save_folder.mkdir(parents=True, exist_ok=True)
         self.pdf_path = self.save_folder / f"{valid_filename}.pdf"
@@ -60,3 +87,8 @@ class ArxivPaper(Paper):
                 if conference in self.comments:
                     self.conference = conference
                     break
+
+
+if __name__ == "__main__":
+    paper = ArxivPaper(url="http://arxiv.org/abs/2307.10768v1")
+    paper.parse()

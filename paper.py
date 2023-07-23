@@ -10,6 +10,7 @@ import logging
 from abc import abstractmethod
 from collections import OrderedDict
 import re
+from typing import List
 
 from pdfminer.high_level import extract_text
 from pdfminer.layout import LAParams, LTTextBox
@@ -21,22 +22,13 @@ from pdfminer.pdfparser import PDFParser
 import numpy as np
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s:%(levelname)s:%(message)s"
-)
+logger = logging.getLogger(__name__)
 
 class Paper:
     """
     A class to represent a paper.
     """
-    def __init__(self,  url='', save_folder='',  pdf_input_path=""):
-        if len(url) == 0 and len(pdf_input_path) == 0:
-            raise ValueError("Please provide a url to fetch the paper or a path to your local paper.")
-            return
-        if len(url) != 0 and len(save_folder) == 0:
-            raise ValueError("The save folder is empty.")
-            return
+    def __init__(self,  url='', save_folder='',  pdf_input_path="", authors=[]):
         self.url = url
         self.save_folder = Path(save_folder)
         self.pdf_input_path = pdf_input_path
@@ -44,11 +36,12 @@ class Paper:
         self.pdf_path = ""
 
         self.title = ""
-        self.authors = ""
+        self.authors: List[str] = authors
         self.conference = ""
         self.model_structure_image = ""
 
         self.abstract = ""
+        self.conclusion = ""
         self.sections = {}
         self.subsections = {}
         self.pdf_dict = {}
@@ -112,13 +105,13 @@ class Paper:
                                     font_sizes[size] = [obj.get_text().strip()]
                                 else:
                                     font_sizes[size].append(obj.get_text().strip())
-            return font_sizes
 
+            return font_sizes
 
     def get_sections(self):
         font_sizes = self.get_font_sizes()
         font_sizes = OrderedDict(sorted(font_sizes.items(), reverse=True))
-
+        logging.info("Getting the sections in the paper.")
         # put the pdf into a dictionary by hierarchy
         # step 1: get the font size of the title
         title_font_size = list(font_sizes.keys())[0]
@@ -134,6 +127,9 @@ class Paper:
         sec1_size = 0
         subsections = []
         for key, value in font_sizes.items():
+            if ("Abstract" in value and "Introduction" in value):
+                sections = value
+                break
             temp = []
             for text in value:
                 match = pattern.match(text)
@@ -151,6 +147,8 @@ class Paper:
                         sections = temp.copy()
                         break
         sections.insert(0, "Abstract")
+        sections.append('Acknowledgement')
+        sections.append("References")
         self.sections = sections
         self.subsections = subsections
 
@@ -159,6 +157,7 @@ class Paper:
         """
         Parse the paper.
         """
+        logging.info("parsing the paper")
         self.get_sections()
         pdf_dict = {}
 
@@ -167,6 +166,7 @@ class Paper:
 
         # Extract text from the PDF
         text = extract_text(self.pdf_path)
+        self.text = text
 
         # Split text into lines
         lines = text.split('\n')
@@ -194,11 +194,13 @@ class Paper:
 
         self.pdf_dict = pdf_dict
         for section, subsections in pdf_dict.items():
-            print(f'{section}:')
+            # print(f'{section}:')
             for subsection, content in subsections.items():
-                print(f'  {subsection}:')
-                for line in content:
-                    print(f'    {line}')
+                # print(f'  {subsection}:')
+                if "conclusion" in subsection.lower():
+                    self.conclusion = ' '.join(content).strip()
+                    # for line in content:
+                    #     print(f'    {line}')
 
 
 
